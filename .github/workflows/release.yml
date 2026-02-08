@@ -1,0 +1,27 @@
+name: Release AddOn
+
+on:
+  push:
+    tags:
+      - '**'
+
+env:
+  CF_API_KEY: ${{ secrets.CF_API_KEY }}
+  WOWI_API_TOKEN: ${{ secrets.WOWI_API_TOKEN }}
+  WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
+  GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Package and release
+        uses: BigWigsMods/packager@v2
+        # Set your CurseForge project ID below once created:
+        # with:
+        #   args: -p YOUR_PROJECT_ID

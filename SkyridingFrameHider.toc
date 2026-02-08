@@ -1,0 +1,10 @@
+## Interface: 120000
+## Title: SkyridingFrameHider
+## Notes: Hide any frame while skyriding, flying, or mounted. Configure via /sfh commands.
+## Author: BlackSunrise
+## Version: @project-version@
+## Category: Interface Enhancements
+## Category-deDE: Interface Enhancements
+## SavedVariables: SkyridingFrameHiderDB
+
+SkyridingFrameHider.lua

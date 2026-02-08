@@ -1,0 +1,7 @@
+package-as: SkyridingFrameHider
+
+ignore:
+  - .gitignore
+  - .github
+  - README.md
+  - AGENTS.md

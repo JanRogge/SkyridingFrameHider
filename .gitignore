@@ -1,0 +1,6 @@
+.vscode/
+.idea/
+*.bak
+
+# Reference sources (cloned for development, not shipped)
+wow-ui-source/
