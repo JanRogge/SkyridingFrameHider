@@ -22,6 +22,5 @@ jobs:
 
       - name: Package and release
         uses: BigWigsMods/packager@v2
-        # Set your CurseForge project ID below once created:
-        # with:
-        #   args: -p YOUR_PROJECT_ID
+        with:
+          args: -p 1457646

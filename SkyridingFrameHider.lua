@@ -4,6 +4,23 @@
 
 local addonName, addon = ...
 
+---------------------------------------------------------------------------
+-- Upvalue caching (local lookups are faster than global table lookups)
+---------------------------------------------------------------------------
+local IsMounted = IsMounted
+local IsFlying = IsFlying
+local type = type
+local pairs = pairs
+local issecretvalue = issecretvalue
+
+-- Cached API references (resolved once during init, avoids repeated nil-checks)
+local GetGlidingInfo  -- C_PlayerInfo.GetGlidingInfo
+local GetPlayerAura   -- C_UnitAuras.GetPlayerAuraBySpellID
+
+-- Constants
+local SKYRIDING_SPELL_ID = 410137
+local TICKER_INTERVAL = 0.25 -- seconds between checks while mounted
+
 -- Default settings
 local defaults = {
 	frameNames = {},
@@ -11,10 +28,12 @@ local defaults = {
 }
 
 -- Runtime state
-local trackedFrames = {}   -- Resolved frame references
-local frameStates = {}     -- Original alpha/mouse state before hiding
-local updateTicker         -- Ticker for frequent updates while mounted
-local lastShouldHide = false -- Track state changes
+local db                       -- Cached reference to SkyridingFrameHiderDB
+local trackedFrames = {}       -- Resolved frame references
+local numTrackedFrames = 0     -- Cached count for fast early-exit checks
+local frameStates = {}         -- Original alpha/mouse state before hiding
+local updateTicker             -- Ticker for frequent updates while mounted
+local lastShouldHide = false   -- Track state changes to avoid redundant work
 local initialized = false
 
 -- Color helpers for chat output
@@ -45,6 +64,17 @@ local function InitializeDB()
 			end
 		end
 	end
+
+	-- Cache reference to avoid global lookup in hot path
+	db = SkyridingFrameHiderDB
+
+	-- Cache API availability once (these never change at runtime)
+	if C_PlayerInfo and C_PlayerInfo.GetGlidingInfo then
+		GetGlidingInfo = C_PlayerInfo.GetGlidingInfo
+	end
+	if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+		GetPlayerAura = C_UnitAuras.GetPlayerAuraBySpellID
+	end
 end
 
 ---------------------------------------------------------------------------
@@ -52,38 +82,35 @@ end
 ---------------------------------------------------------------------------
 
 local function ShouldHideFrames()
-	local db = SkyridingFrameHiderDB
-	local mounted = IsMounted("player")
-	local flying = IsFlying("player")
-
-	if not mounted then
+	if not IsMounted() then
 		return false
 	end
 
+	local mode = db.mode
+
 	-- Mode: mounted -- hide whenever mounted
-	if db.mode == "mounted" then
+	if mode == "mounted" then
 		return true
 	end
 
+	local flying = IsFlying()
+
 	-- Mode: flying -- hide on all flying (includes skyriding)
-	if db.mode == "flying" and flying then
-		return true
+	if mode == "flying" then
+		return flying
 	end
 
 	-- Mode: skyriding (default) -- only hide while skyriding
 	if flying then
-		-- Method 1: Check GetGlidingInfo
-		if C_PlayerInfo and C_PlayerInfo.GetGlidingInfo then
-			local isGliding, canGlide = C_PlayerInfo.GetGlidingInfo()
+		if GetGlidingInfo then
+			local _, canGlide = GetGlidingInfo()
 			if canGlide then
 				return true
 			end
 		end
 
-		-- Method 2: Check for Skyriding buff (spell ID 410137)
-		if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
-			local buffName = C_UnitAuras.GetPlayerAuraBySpellID(410137)
-			if buffName then
+		if GetPlayerAura then
+			if GetPlayerAura(SKYRIDING_SPELL_ID) then
 				return true
 			end
 		end
@@ -97,47 +124,54 @@ end
 ---------------------------------------------------------------------------
 
 local function DiscoverFrames()
-	local db = SkyridingFrameHiderDB
-	trackedFrames = {}
+	local newFrames = {}
+	local count = 0
 
-	for _, frameName in ipairs(db.frameNames) do
-		local targetFrame = _G[frameName]
+	for i = 1, #db.frameNames do
+		local targetFrame = _G[db.frameNames[i]]
 		if targetFrame then
-			table.insert(trackedFrames, targetFrame)
+			count = count + 1
+			newFrames[count] = targetFrame
 		end
 	end
+
+	trackedFrames = newFrames
+	numTrackedFrames = count
 end
 
 local function HideTrackedFrames()
-	for _, targetFrame in ipairs(trackedFrames) do
-		if targetFrame and targetFrame.SetAlpha and targetFrame.GetAlpha then
+	for i = 1, numTrackedFrames do
+		local targetFrame = trackedFrames[i]
+		if targetFrame.SetAlpha and targetFrame.GetAlpha then
 			-- Store the original state if not already stored
 			if not frameStates[targetFrame] then
 				local currentAlpha = targetFrame:GetAlpha()
-				-- Skip taint-protected values
-				if issecretvalue and issecretvalue(currentAlpha) then
-					return
+				-- Guard against secret values; skip this frame only (not all frames)
+				if not (issecretvalue and issecretvalue(currentAlpha)) then
+					frameStates[targetFrame] = {
+						alpha = currentAlpha,
+						mouseEnabled = targetFrame.IsMouseEnabled and targetFrame:IsMouseEnabled() or nil,
+					}
 				end
-				frameStates[targetFrame] = {
-					alpha = currentAlpha,
-					mouseEnabled = targetFrame.EnableMouse and targetFrame:IsMouseEnabled() or nil,
-				}
 			end
-			-- Make invisible
-			targetFrame:SetAlpha(0)
-			-- Disable mouse interaction to prevent invisible clicks
-			if targetFrame.EnableMouse and frameStates[targetFrame].mouseEnabled then
-				targetFrame:EnableMouse(false)
+			-- Make invisible (only if we successfully saved state)
+			local state = frameStates[targetFrame]
+			if state then
+				targetFrame:SetAlpha(0)
+				if state.mouseEnabled and targetFrame.EnableMouse then
+					targetFrame:EnableMouse(false)
+				end
 			end
 		end
 	end
 end
 
 local function RestoreTrackedFrames()
-	for _, targetFrame in ipairs(trackedFrames) do
-		if targetFrame and targetFrame.SetAlpha and frameStates[targetFrame] then
-			local state = frameStates[targetFrame]
-			if state.alpha then
+	for i = 1, numTrackedFrames do
+		local targetFrame = trackedFrames[i]
+		local state = frameStates[targetFrame]
+		if state then
+			if targetFrame.SetAlpha and state.alpha then
 				targetFrame:SetAlpha(state.alpha)
 			end
 			if targetFrame.EnableMouse and state.mouseEnabled ~= nil then
@@ -149,6 +183,11 @@ local function RestoreTrackedFrames()
 end
 
 local function CheckAndUpdateFrameVisibility()
+	-- Early exit if nothing is tracked
+	if numTrackedFrames == 0 then
+		return
+	end
+
 	local shouldHide = ShouldHideFrames()
 
 	if shouldHide ~= lastShouldHide then
@@ -164,15 +203,13 @@ end
 
 -- Start/stop ticker based on mount state for efficiency
 local function UpdateTicker()
-	local mounted = IsMounted("player")
+	local mounted = IsMounted()
 
 	if mounted and not updateTicker then
-		updateTicker = C_Timer.NewTicker(0.15, CheckAndUpdateFrameVisibility)
+		updateTicker = C_Timer.NewTicker(TICKER_INTERVAL, CheckAndUpdateFrameVisibility)
 	elseif not mounted and updateTicker then
 		updateTicker:Cancel()
 		updateTicker = nil
-		-- Final check to restore frames
-		CheckAndUpdateFrameVisibility()
 	end
 end
 
@@ -181,55 +218,55 @@ end
 ---------------------------------------------------------------------------
 
 local function HandleSlashCommand(msg)
-	local args = {}
-	for word in msg:gmatch("%S+") do
-		table.insert(args, word)
-	end
-
-	local cmd = args[1] and args[1]:lower() or ""
-	local param = args[2] or ""
+	local cmd, param = strsplit(" ", msg, 2)
+	cmd = cmd and cmd:lower() or ""
+	param = param and strtrim(param) or ""
 
 	-- /sfh add <framename>
 	if cmd == "add" then
-		local frameName = strtrim(param)
-		if frameName == "" then
+		if param == "" then
 			PrintMsg("Usage: /sfh add <framename>")
 			return
 		end
 
-		local targetFrame = _G[frameName]
+		local targetFrame = _G[param]
 		if not targetFrame then
-			PrintError("Frame not found: " .. frameName)
+			PrintError("Frame not found: " .. param)
 			PrintMsg("Make sure the frame exists and the name is correct.")
 			return
 		end
 
 		-- Check if already tracked
-		for _, name in ipairs(SkyridingFrameHiderDB.frameNames) do
-			if name == frameName then
-				PrintMsg("Frame already tracked: " .. frameName)
+		for i = 1, #db.frameNames do
+			if db.frameNames[i] == param then
+				PrintMsg("Frame already tracked: " .. param)
 				return
 			end
 		end
 
-		table.insert(SkyridingFrameHiderDB.frameNames, frameName)
+		db.frameNames[#db.frameNames + 1] = param
 		DiscoverFrames()
-		PrintSuccess("Added frame: " .. frameName)
+
+		-- If currently hiding, also hide the newly added frame immediately
+		if lastShouldHide then
+			HideTrackedFrames()
+		end
+
+		PrintSuccess("Added frame: " .. param)
 		return
 	end
 
 	-- /sfh remove <framename>
 	if cmd == "remove" then
-		local frameName = strtrim(param)
-		if frameName == "" then
+		if param == "" then
 			PrintMsg("Usage: /sfh remove <framename>")
 			return
 		end
 
-		for i, name in ipairs(SkyridingFrameHiderDB.frameNames) do
-			if name == frameName then
+		for i = 1, #db.frameNames do
+			if db.frameNames[i] == param then
 				-- Restore the frame if it is currently hidden
-				local targetFrame = _G[frameName]
+				local targetFrame = _G[param]
 				if targetFrame and frameStates[targetFrame] then
 					local state = frameStates[targetFrame]
 					if state.alpha then
@@ -241,24 +278,25 @@ local function HandleSlashCommand(msg)
 					frameStates[targetFrame] = nil
 				end
 
-				table.remove(SkyridingFrameHiderDB.frameNames, i)
+				table.remove(db.frameNames, i)
 				DiscoverFrames()
-				PrintSuccess("Removed frame: " .. frameName)
+				PrintSuccess("Removed frame: " .. param)
 				return
 			end
 		end
 
-		PrintError("Frame not in tracked list: " .. frameName)
+		PrintError("Frame not in tracked list: " .. param)
 		return
 	end
 
 	-- /sfh list
 	if cmd == "list" then
 		PrintMsg("Tracked frames:")
-		if #SkyridingFrameHiderDB.frameNames == 0 then
+		if #db.frameNames == 0 then
 			print("  (none)")
 		else
-			for i, name in ipairs(SkyridingFrameHiderDB.frameNames) do
+			for i = 1, #db.frameNames do
+				local name = db.frameNames[i]
 				local exists = _G[name] and "|cFF33FF33[found]|r" or "|cFFFF3333[not found]|r"
 				print("  " .. i .. ". " .. name .. " " .. exists)
 			end
@@ -270,7 +308,7 @@ local function HandleSlashCommand(msg)
 	if cmd == "mode" then
 		local mode = param:lower()
 		if mode == "" then
-			PrintMsg("Current mode: |cFFFFFF00" .. SkyridingFrameHiderDB.mode .. "|r")
+			PrintMsg("Current mode: |cFFFFFF00" .. db.mode .. "|r")
 			PrintMsg("Available modes: skyriding, flying, mounted")
 			return
 		end
@@ -280,10 +318,11 @@ local function HandleSlashCommand(msg)
 			RestoreTrackedFrames()
 			lastShouldHide = false
 
-			SkyridingFrameHiderDB.mode = mode
+			db.mode = mode
 			PrintSuccess("Mode set to: " .. mode)
 
-			-- Re-check with new mode
+			-- Re-check with new mode and update ticker
+			UpdateTicker()
 			CheckAndUpdateFrameVisibility()
 			return
 		end
@@ -313,17 +352,21 @@ SlashCmdList["SKYRIDINGFRAMEHIDER"] = HandleSlashCommand
 -- Event handling & initialization
 ---------------------------------------------------------------------------
 
-local frame = CreateFrame("Frame")
-frame:RegisterEvent("ADDON_LOADED")
-frame:RegisterEvent("PLAYER_LOGIN")
+local eventFrame = CreateFrame("Frame")
+eventFrame:RegisterEvent("ADDON_LOADED")
+eventFrame:RegisterEvent("PLAYER_LOGIN")
 
-frame:SetScript("OnEvent", function(self, event, arg1)
-	if event == "ADDON_LOADED" and arg1 == addonName then
-		InitializeDB()
+eventFrame:SetScript("OnEvent", function(self, event, arg1)
+	if event == "ADDON_LOADED" then
+		if arg1 == addonName then
+			InitializeDB()
+		end
+		return
+	end
 
-	elseif event == "PLAYER_LOGIN" then
+	if event == "PLAYER_LOGIN" then
 		-- Check API availability
-		if not (C_PlayerInfo and C_PlayerInfo.GetGlidingInfo) then
+		if not GetGlidingInfo then
 			PrintError("Requires WoW 10.0.5 or newer for skyriding detection.")
 		end
 
@@ -341,12 +384,27 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		CheckAndUpdateFrameVisibility()
 
 		PrintMsg("Loaded. Type |cFFFFFF00/sfh|r for commands.")
+		return
+	end
 
-	else
-		-- Runtime events (UNIT_AURA, PLAYER_MOUNT_DISPLAY_CHANGED, PLAYER_ENTERING_WORLD)
-		if initialized then
-			UpdateTicker()
+	-- Runtime events
+	if not initialized then
+		return
+	end
+
+	-- UNIT_AURA: only run the lightweight visibility check, skip ticker management.
+	-- This event fires very frequently during combat; avoid the redundant IsMounted()
+	-- call in UpdateTicker(). The ticker already handles periodic detection.
+	if event == "UNIT_AURA" then
+		if updateTicker then
+			-- Only check when already mounted (ticker is running)
 			CheckAndUpdateFrameVisibility()
 		end
+		return
 	end
+
+	-- PLAYER_MOUNT_DISPLAY_CHANGED / PLAYER_ENTERING_WORLD:
+	-- Infrequent events that may change mount state; manage ticker accordingly
+	UpdateTicker()
+	CheckAndUpdateFrameVisibility()
 end)

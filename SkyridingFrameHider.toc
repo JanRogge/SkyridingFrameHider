@@ -5,6 +5,8 @@
 ## Version: @project-version@
 ## Category: Interface Enhancements
 ## Category-deDE: Interface Enhancements
+## IconTexture: Interface/Addons/SkyridingFrameHider/Media/SkyridingFrameHider_Icon.tga
 ## SavedVariables: SkyridingFrameHiderDB
+## X-Curse-Project-ID: 1457646
 
 SkyridingFrameHider.lua
