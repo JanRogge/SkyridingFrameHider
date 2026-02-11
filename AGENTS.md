@@ -171,6 +171,6 @@ SkyridingFrameHiderDB = {
 
 - Frames are made invisible via `SetAlpha(0)` + `EnableMouse(false)`, NOT via `Hide()`. This avoids taint issues with protected frames and preserves layout.
 - Original alpha and mouse state are saved before hiding and restored when the condition ends.
-- A `C_Timer.NewTicker` at 0.15s is only active while the player is mounted, for efficiency.
+- A `C_Timer.NewTicker` at 0.25s is only active while the player is mounted in "flying" or "skyriding" mode, for efficiency. In "mounted" mode the ticker is not needed because mount/dismount is fully captured by events.
 - Frame references are resolved from `_G[frameName]` on login and when frames are added/removed.
-- The addon registers for `UNIT_AURA` (player), `PLAYER_MOUNT_DISPLAY_CHANGED`, and `PLAYER_ENTERING_WORLD` events to detect state changes.
+- The addon registers for `PLAYER_MOUNT_DISPLAY_CHANGED` and `PLAYER_ENTERING_WORLD` events to detect state changes.

@@ -34,7 +34,6 @@ local numTrackedFrames = 0     -- Cached count for fast early-exit checks
 local frameStates = {}         -- Original alpha/mouse state before hiding
 local updateTicker             -- Ticker for frequent updates while mounted
 local lastShouldHide = false   -- Track state changes to avoid redundant work
-local initialized = false
 
 -- Color helpers for chat output
 local function PrintMsg(msg)
@@ -201,13 +200,17 @@ local function CheckAndUpdateFrameVisibility()
 	end
 end
 
--- Start/stop ticker based on mount state for efficiency
+-- Start/stop ticker based on mount state for efficiency.
+-- In "mounted" mode the hide state depends solely on IsMounted(), which is
+-- fully captured by PLAYER_MOUNT_DISPLAY_CHANGED, so no ticker is needed.
+-- In "flying"/"skyriding" modes the ticker polls IsFlying()/GetGlidingInfo()
+-- because there is no event for takeoff/landing transitions.
 local function UpdateTicker()
-	local mounted = IsMounted()
+	local needsTicker = IsMounted() and db.mode ~= "mounted"
 
-	if mounted and not updateTicker then
+	if needsTicker and not updateTicker then
 		updateTicker = C_Timer.NewTicker(TICKER_INTERVAL, CheckAndUpdateFrameVisibility)
-	elseif not mounted and updateTicker then
+	elseif not needsTicker and updateTicker then
 		updateTicker:Cancel()
 		updateTicker = nil
 	end
@@ -355,6 +358,8 @@ SlashCmdList["SKYRIDINGFRAMEHIDER"] = HandleSlashCommand
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
+eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
+eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
@@ -365,19 +370,8 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
 	end
 
 	if event == "PLAYER_LOGIN" then
-		-- Check API availability
-		if not GetGlidingInfo then
-			PrintError("Requires WoW 10.0.5 or newer for skyriding detection.")
-		end
-
 		-- Discover frames and start tracking
 		DiscoverFrames()
-		initialized = true
-
-		-- Register runtime events
-		self:RegisterUnitEvent("UNIT_AURA", "player")
-		self:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
-		self:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 		-- Initial check
 		UpdateTicker()
@@ -387,24 +381,11 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
 		return
 	end
 
-	-- Runtime events
-	if not initialized then
-		return
-	end
-
-	-- UNIT_AURA: only run the lightweight visibility check, skip ticker management.
-	-- This event fires very frequently during combat; avoid the redundant IsMounted()
-	-- call in UpdateTicker(). The ticker already handles periodic detection.
-	if event == "UNIT_AURA" then
-		if updateTicker then
-			-- Only check when already mounted (ticker is running)
+	if event == "PLAYER_MOUNT_DISPLAY_CHANGED" or event == "PLAYER_ENTERING_WORLD" then
+		if db then
+			UpdateTicker()
 			CheckAndUpdateFrameVisibility()
 		end
 		return
 	end
-
-	-- PLAYER_MOUNT_DISPLAY_CHANGED / PLAYER_ENTERING_WORLD:
-	-- Infrequent events that may change mount state; manage ticker accordingly
-	UpdateTicker()
-	CheckAndUpdateFrameVisibility()
 end)
